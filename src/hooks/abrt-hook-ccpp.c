@@ -19,6 +19,7 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 #include <syslog.h>
+#include <fnmatch.h>
 #include <sys/utsname.h>
 #include "libabrt.h"
 #include <selinux/selinux.h>
@@ -688,6 +689,19 @@ cleanup:
     return socket_inode;
 }
 
+static bool is_path_ignored(const GList *list, const char *path)
+{
+    const GList *li;
+    for (li = list; li != NULL; li = g_list_next(li))
+    {
+        if (fnmatch((char*)li->data, path, /*flags:*/ 0) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Like other glibc functions this one also return 0 on logical true, positive
  * number on logical false and negative number on error. */
 static int process_is_syslog(pid_t pid)
@@ -759,6 +773,26 @@ cleanup:
     return r;
 }
 
+static void error_msg_not_process_crash(const char *pid_str, const char *process_str,
+        long unsigned uid, int signal_no, const char *signame, const char *message, ...)
+{
+    va_list p;
+    va_start(p, message);
+    char *message_full = xvasprintf(message, p);
+    va_end(p);
+
+    if (signame)
+        error_msg("Process %s (%s) of user %lu killed by SIG%s - %s", pid_str,
+                        process_str, uid, signame, message_full);
+    else
+        error_msg("Process %s (%s) of user %lu killed by signal %d - %s", pid_str,
+                        process_str, uid, signal_no, message_full);
+
+    free(message_full);
+
+    return;
+}
+
 int main(int argc, char** argv)
 {
     int err = 1;
@@ -813,6 +847,7 @@ int main(int argc, char** argv)
     /* ... and plugins/CCpp.conf */
     bool setting_MakeCompatCore;
     bool setting_SaveBinaryImage;
+    GList *setting_ignored_paths = NULL;
     {
         map_string_t *settings = new_map_string();
         load_abrt_plugin_conf_file("CCpp.conf", settings);
@@ -824,12 +859,17 @@ int main(int argc, char** argv)
         value = get_map_string_item_or_NULL(settings, "VerboseLog");
         if (value)
             g_verbose = xatoi_positive(value);
+        value = get_map_string_item_or_NULL(settings, "IgnoredPaths");
+        if (value)
+            setting_ignored_paths = parse_list(value);
         free_map_string(settings);
     }
 
     errno = 0;
     const char* signal_str = argv[1];
     int signal_no = xatoi_positive(signal_str);
+    const char *signame = NULL;
+    bool signal_is_fatal_bool = signal_is_fatal(signal_no, &signame);
     off_t ulimit_c = strtoull(argv[2], NULL, 10);
     if (ulimit_c < 0) /* unlimited? */
     {
@@ -867,6 +907,14 @@ int main(int argc, char** argv)
     {
         error_msg_and_die("PID %lu is '%s', not dumping it to avoid recursion",
                         (long)pid, executable);
+    }
+
+    if (executable && is_path_ignored(setting_ignored_paths, executable))
+    {
+        error_msg_not_process_crash(pid_str, argv[7], (long unsigned)uid, signal_no,
+                signame, "ignoring (listed in 'IgnoredPaths')");
+
+        return 0;
     }
 
     user_pwd = get_cwd(pid); /* may be NULL on error */
