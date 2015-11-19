@@ -20,6 +20,7 @@ cli-sanity
 cli-status
 console-notifications
 check-hook-install
+hook-ccpp-ignoring
 dumpoops
 dbus-api
 abrt-python
